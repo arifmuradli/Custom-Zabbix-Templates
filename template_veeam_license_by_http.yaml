@@ -1,0 +1,206 @@
+zabbix_export:
+  version: '7.2'
+  template_groups:
+    - uuid: fec076d0882a401387761bfa7a080af5
+      name: Templates/Applications
+  templates:
+    - uuid: 51bd5eb46def4ed99e9e92db23714e0b
+      template: 'Veeam License by HTTP'
+      name: 'Veeam License by HTTP'
+      description: 'Veeam B&R license usage/expiry via REST API (/api/v1/license). Uses a dedicated admin account ({$VEEAM.LICENSE.USER}/{$VEEAM.LICENSE.PASSWORD}); /api/v1/license requires Veeam Backup Administrator.'
+      groups:
+        - name: Templates/Applications
+      items:
+        - uuid: e52a0183b08949298f96f1b95af9485d
+          name: 'Veeam: Get license data'
+          type: SCRIPT
+          key: veeam.license.get
+          delay: 1h
+          history: '0'
+          value_type: TEXT
+          trends: '0'
+          params: |
+            var p = JSON.parse(value),
+                base = p.url.replace(/\/+$/, ''),
+                req = new HttpRequest(), resp, token;
+
+            req.addHeader('Content-Type: application/x-www-form-urlencoded');
+            req.addHeader('x-api-version: ' + p.api_version);
+            resp = req.post(base + '/api/oauth2/token',
+                'grant_type=password&username=' + encodeURIComponent(p.user) +
+                '&password=' + encodeURIComponent(p.password));
+            if (req.getStatus() !== 200) throw 'Auth failed: HTTP ' + req.getStatus() + ' ' + resp;
+            token = JSON.parse(resp).access_token;
+
+            req.clearHeader();
+            req.addHeader('Authorization: Bearer ' + token);
+            req.addHeader('x-api-version: ' + p.api_version);
+            resp = req.get(base + '/api/v1/license');
+            if (req.getStatus() !== 200) throw 'License request failed: HTTP ' + req.getStatus() + ' ' + resp;
+
+            try { req.post(base + '/api/oauth2/logout', ''); } catch (e) {}
+            return resp;
+          parameters:
+            - name: api_version
+              value: '{$VEEAM.LICENSE.API.VERSION}'
+            - name: password
+              value: '{$VEEAM.LICENSE.PASSWORD}'
+            - name: url
+              value: '{$VEEAM.API.URL}'
+            - name: user
+              value: '{$VEEAM.LICENSE.USER}'
+          timeout: 30s
+          tags:
+            - tag: component
+              value: license
+        - uuid: 3f93f2bb672d478a888480bba9e9a65a
+          name: 'Veeam: License status'
+          type: DEPENDENT
+          key: veeam.license.status
+          history: 30d
+          value_type: CHAR
+          trends: '0'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.status
+          master_item:
+            key: veeam.license.get
+          tags:
+            - tag: component
+              value: license
+          triggers:
+            - uuid: 08822260fa7a43d49727d9ed799b1203
+              expression: 'last(/Veeam License by HTTP/veeam.license.status)<>"Valid"'
+              name: 'Veeam: License status is not Valid'
+              opdata: 'Status: {ITEM.LASTVALUE1}'
+              priority: HIGH
+        - uuid: eb0d00cde44849899602a1a837175aab
+          name: 'Veeam: License licensed to'
+          type: DEPENDENT
+          key: veeam.license.licensed_to
+          history: 30d
+          value_type: CHAR
+          trends: '0'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.licensedTo
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: veeam.license.get
+          tags:
+            - tag: component
+              value: license
+        - uuid: fd85ee89d3514efd88d2f661d7d1db45
+          name: 'Veeam: License days until expiration'
+          type: DEPENDENT
+          key: veeam.license.days_left
+          value_type: FLOAT
+          units: d
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.expirationDate
+              error_handler: DISCARD_VALUE
+            - type: JAVASCRIPT
+              parameters:
+                - 'return Math.floor((Date.parse(value) - Date.now()) / 86400000);'
+          master_item:
+            key: veeam.license.get
+          tags:
+            - tag: component
+              value: license
+          triggers:
+            - uuid: 83c90fb933c942a9a7537f2849d6a91e
+              expression: 'last(/Veeam License by HTTP/veeam.license.days_left)<{$VEEAM.LICENSE.EXPIRE.CRIT}'
+              name: 'Veeam: License expires in less than {$VEEAM.LICENSE.EXPIRE.CRIT} days'
+              opdata: 'Days left: {ITEM.LASTVALUE1}'
+              priority: HIGH
+            - uuid: 2c788f71f2c24c3f811b227771fa8bf5
+              expression: 'last(/Veeam License by HTTP/veeam.license.days_left)<{$VEEAM.LICENSE.EXPIRE.WARN}'
+              name: 'Veeam: License expires in less than {$VEEAM.LICENSE.EXPIRE.WARN} days'
+              opdata: 'Days left: {ITEM.LASTVALUE1}'
+              priority: WARNING
+              dependencies:
+                - name: 'Veeam: License expires in less than {$VEEAM.LICENSE.EXPIRE.CRIT} days'
+                  expression: 'last(/Veeam License by HTTP/veeam.license.days_left)<{$VEEAM.LICENSE.EXPIRE.CRIT}'
+        - uuid: f01b050c49084c7fb1ccd7f78d7a123d
+          name: 'Veeam: Instances licensed'
+          type: DEPENDENT
+          key: veeam.license.instances.licensed
+          value_type: FLOAT
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.instanceLicenseSummary.licensedInstancesNumber
+          master_item:
+            key: veeam.license.get
+          tags:
+            - tag: component
+              value: license
+        - uuid: f52128fcb90f47ba9a57e095ec53a884
+          name: 'Veeam: Instances used'
+          type: DEPENDENT
+          key: veeam.license.instances.used
+          value_type: FLOAT
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.instanceLicenseSummary.usedInstancesNumber
+          master_item:
+            key: veeam.license.get
+          tags:
+            - tag: component
+              value: license
+          triggers:
+            - uuid: e7ea7883034e480abf980e2f97cc1869
+              expression: 'nodata(/Veeam License by HTTP/veeam.license.instances.used,3h)=1'
+              name: 'Veeam: No license data for 3h (check credentials / API)'
+              priority: WARNING
+        - uuid: 3ea8f5c798ed4443a4bf7d327ebbd46d
+          name: 'Veeam: Instances usage'
+          type: CALCULATED
+          key: veeam.license.instances.pct
+          delay: 1h
+          value_type: FLOAT
+          units: '%'
+          params: 'last(//veeam.license.instances.used)/last(//veeam.license.instances.licensed)*100'
+          tags:
+            - tag: component
+              value: license
+          triggers:
+            - uuid: f7e571874be0423a82f367d33022bdf1
+              expression: 'last(/Veeam License by HTTP/veeam.license.instances.pct)>={$VEEAM.LICENSE.USAGE.CRIT}'
+              name: 'Veeam: License instance usage >= {$VEEAM.LICENSE.USAGE.CRIT}%'
+              opdata: 'Used: {ITEM.LASTVALUE1}'
+              priority: HIGH
+            - uuid: e5f091cd07634096b6e5fb6a51021e1f
+              expression: 'last(/Veeam License by HTTP/veeam.license.instances.pct)>={$VEEAM.LICENSE.USAGE.WARN}'
+              name: 'Veeam: License instance usage >= {$VEEAM.LICENSE.USAGE.WARN}%'
+              opdata: 'Used: {ITEM.LASTVALUE1}'
+              priority: WARNING
+              dependencies:
+                - name: 'Veeam: License instance usage >= {$VEEAM.LICENSE.USAGE.CRIT}%'
+                  expression: 'last(/Veeam License by HTTP/veeam.license.instances.pct)>={$VEEAM.LICENSE.USAGE.CRIT}'
+      tags:
+        - tag: class
+          value: software
+        - tag: target
+          value: veeam
+      macros:
+        - macro: '{$VEEAM.LICENSE.API.VERSION}'
+          value: 1.2-rev0
+        - macro: '{$VEEAM.LICENSE.EXPIRE.CRIT}'
+          value: '7'
+        - macro: '{$VEEAM.LICENSE.EXPIRE.WARN}'
+          value: '30'
+        - macro: '{$VEEAM.LICENSE.PASSWORD}'
+          type: SECRET_TEXT
+          description: 'Password of the Veeam Backup Administrator account used only for license queries. Set on host.'
+        - macro: '{$VEEAM.LICENSE.USAGE.CRIT}'
+          value: '100'
+        - macro: '{$VEEAM.LICENSE.USAGE.WARN}'
+          value: '90'
+        - macro: '{$VEEAM.LICENSE.USER}'
+          description: 'DOMAIN\user with Veeam Backup Administrator role (license endpoint requires it). Set on host.'
