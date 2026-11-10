@@ -1,0 +1,1020 @@
+zabbix_export:
+  version: '7.2'
+  template_groups:
+    - uuid: ec00e4ea46d9445a91891dfb6af503f0
+      name: Templates/Applications
+  templates:
+    - uuid: 87ae4c857feb4c6ca40b0628bd4652ec
+      template: 'Veeam Backup Lite by HTTP'
+      name: 'Veeam Backup Lite by HTTP'
+      description: |
+        Lightweight Veeam B&R REST monitoring with separate master items.
+        Does NOT call /api/v1/jobs/states (slow Rest.GetJobStatesFiltered procedure).
+        Job status is derived from the latest session per job within {$VEEAM.SESSIONS.HOURS}.
+      groups:
+        - name: Templates/Applications
+      items:
+        - uuid: 280eff92bcee4696980351132a6bb24b
+          name: 'Veeam: Get repositories'
+          type: SCRIPT
+          key: veeam.lite.repos.get
+          delay: '{$VEEAM.REPOS.INTERVAL}'
+          history: 7d
+          value_type: TEXT
+          trends: '0'
+          timeout: '{$VEEAM.DATA.TIMEOUT}'
+          description: 'Raw data from /api/v1/backupInfrastructure/repositories/states (normalized).'
+          params: |
+            var p = JSON.parse(value),
+                base = String(p.url).replace(/\/+$/, ''),
+                req = new HttpRequest(),
+                token = null;
+
+            if (p.proxy) { req.setProxy(p.proxy); }
+
+            function call(method, path, body) {
+                req.clearHeader();
+                req.addHeader('x-api-version: ' + p.version);
+                req.addHeader('Accept: application/json');
+                if (token) { req.addHeader('Authorization: Bearer ' + token); }
+                var resp;
+                if (method === 'POST') {
+                    req.addHeader('Content-Type: application/x-www-form-urlencoded');
+                    resp = req.post(base + path, body);
+                } else {
+                    resp = req.get(base + path);
+                }
+                var status = req.getStatus();
+                if (status < 200 || status >= 300) {
+                    throw 'HTTP ' + status + ' on ' + path + ': ' + String(resp).substring(0, 300);
+                }
+                return resp ? JSON.parse(resp) : {};
+            }
+
+            function login() {
+                token = call('POST', '/api/oauth2/token',
+                    'grant_type=password&username=' + encodeURIComponent(p.user) +
+                    '&password=' + encodeURIComponent(p.password)).access_token;
+                if (!token) { throw 'No access_token in token response'; }
+            }
+
+            function logout() {
+                try { call('POST', '/api/oauth2/logout', ''); } catch (e) {}
+            }
+
+            function getAll(path) {
+                var out = [], skip = 0, limit = 200, page;
+                do {
+                    page = call('GET', path + (path.indexOf('?') >= 0 ? '&' : '?') +
+                        'skip=' + skip + '&limit=' + limit).data || [];
+                    out = out.concat(page);
+                    skip += limit;
+                } while (page.length === limit && skip < 10000);
+                return out;
+            }
+
+            login();
+            var repos;
+            try {
+                repos = getAll('/api/v1/backupInfrastructure/repositories/states');
+            } finally {
+                logout();
+            }
+
+            var GB = 1073741824;
+            return JSON.stringify(repos.map(function (r) {
+                var cap = Number(r.capacityGB) || 0,
+                    free = Number(r.freeGB) || 0,
+                    used = Number(r.usedSpaceGB) || 0;
+                return {
+                    id: r.id,
+                    name: r.name,
+                    type: r.type,
+                    host: r.hostName || '',
+                    path: r.path || '',
+                    capacity: Math.round(cap * GB),
+                    free: Math.round(free * GB),
+                    used: Math.round(used * GB),
+                    free_pct: cap > 0 ? Math.round(free / cap * 10000) / 100 : -1,
+                    online: typeof r.isOnline === 'boolean' ? (r.isOnline ? 1 : 0) : -1
+                };
+            }));
+          parameters:
+            - name: url
+              value: '{$VEEAM.API.URL}'
+            - name: version
+              value: '{$VEEAM.API.VERSION}'
+            - name: user
+              value: '{$VEEAM.USER}'
+            - name: password
+              value: '{$VEEAM.PASSWORD}'
+            - name: proxy
+              value: '{$VEEAM.HTTP.PROXY}'
+          tags:
+            - tag: component
+              value: raw
+        - uuid: fc1d2b6a83544d2e98af163ff500bfe0
+          name: 'Veeam: Get sessions'
+          type: SCRIPT
+          key: veeam.lite.sessions.get
+          delay: '{$VEEAM.SESSIONS.INTERVAL}'
+          history: 7d
+          value_type: TEXT
+          trends: '0'
+          timeout: '{$VEEAM.DATA.TIMEOUT}'
+          description: 'Sessions created in the last {$VEEAM.SESSIONS.HOURS}h, summarized (latest session per job decides failed/warning).'
+          params: |
+            var p = JSON.parse(value),
+                base = String(p.url).replace(/\/+$/, ''),
+                req = new HttpRequest(),
+                token = null;
+
+            if (p.proxy) { req.setProxy(p.proxy); }
+
+            function call(method, path, body) {
+                req.clearHeader();
+                req.addHeader('x-api-version: ' + p.version);
+                req.addHeader('Accept: application/json');
+                if (token) { req.addHeader('Authorization: Bearer ' + token); }
+                var resp;
+                if (method === 'POST') {
+                    req.addHeader('Content-Type: application/x-www-form-urlencoded');
+                    resp = req.post(base + path, body);
+                } else {
+                    resp = req.get(base + path);
+                }
+                var status = req.getStatus();
+                if (status < 200 || status >= 300) {
+                    throw 'HTTP ' + status + ' on ' + path + ': ' + String(resp).substring(0, 300);
+                }
+                return resp ? JSON.parse(resp) : {};
+            }
+
+            function login() {
+                token = call('POST', '/api/oauth2/token',
+                    'grant_type=password&username=' + encodeURIComponent(p.user) +
+                    '&password=' + encodeURIComponent(p.password)).access_token;
+                if (!token) { throw 'No access_token in token response'; }
+            }
+
+            function logout() {
+                try { call('POST', '/api/oauth2/logout', ''); } catch (e) {}
+            }
+
+            function getAll(path) {
+                var out = [], skip = 0, limit = 200, page;
+                do {
+                    page = call('GET', path + (path.indexOf('?') >= 0 ? '&' : '?') +
+                        'skip=' + skip + '&limit=' + limit).data || [];
+                    out = out.concat(page);
+                    skip += limit;
+                } while (page.length === limit && skip < 10000);
+                return out;
+            }
+
+            function parseTime(t) {
+                // Trim fractional seconds to 3 digits for the JS engine
+                return t ? Date.parse(String(t).replace(/(\.\d{3})\d+/, '$1')) : NaN;
+            }
+
+            var hours = parseInt(p.hours, 10) || 24,
+                maxRun = parseFloat(p.running_max_hours) || 12,
+                excl = (p.exclude && p.exclude !== 'CHANGE_IF_NEEDED') ? new RegExp(p.exclude, 'i') : null,
+                exclType = (p.exclude_type && p.exclude_type !== 'CHANGE_IF_NEEDED') ? new RegExp(p.exclude_type, 'i') : null,
+                exclRun = (p.exclude_running && p.exclude_running !== 'CHANGE_IF_NEEDED') ? new RegExp(p.exclude_running, 'i') : null,
+                now = Date.now(),
+                since = new Date(now - hours * 3600000).toISOString().replace(/\.\d+/, '');
+
+            login();
+            var sessions;
+            try {
+                sessions = getAll('/api/v1/sessions?createdAfterFilter=' + encodeURIComponent(since));
+            } finally {
+                logout();
+            }
+
+            var latest = {},
+                states = {},
+                types = {},
+                res = { total: 0, jobs: 0, failed: 0, warning: 0, running: 0, long_running: 0 },
+                names = { failed: [], warning: [], long_running: [] };
+
+            sessions.forEach(function (s) {
+                var name = s.name || '',
+                    type = s.sessionType || 'Unknown';
+                types[type] = (types[type] || 0) + 1;
+                if (excl && excl.test(name)) { return; }
+                if (exclType && exclType.test(type)) { return; }
+                res.total++;
+
+                var st = s.state || 'Unknown',
+                    started = parseTime(s.creationTime);
+                states[st] = (states[st] || 0) + 1;
+
+                if (st !== 'Stopped') {
+                    res.running++;
+                    if (!isNaN(started) && now - started > maxRun * 3600000 &&
+                            !(exclRun && exclRun.test(name))) {
+                        res.long_running++;
+                        names.long_running.push(name);
+                    }
+                }
+
+                // Key by name: recurring system tasks get a new jobId per run
+                if (!latest[name] || started > latest[name].t) {
+                    latest[name] = { t: started, s: s };
+                }
+            });
+
+            Object.keys(latest).forEach(function (k) {
+                var s = latest[k].s,
+                    r = s.result && s.result.result,
+                    msg = (s.result && s.result.message) ? String(s.result.message).replace(/\s+/g, ' ').substring(0, 200) : '',
+                    label = s.name + (msg ? ' (' + msg + ')' : '');
+                res.jobs++;
+                if (s.state !== 'Stopped') { return; }
+                if (r === 'Failed') {
+                    res.failed++;
+                    names.failed.push(label);
+                } else if (r === 'Warning') {
+                    res.warning++;
+                    names.warning.push(label);
+                }
+            });
+
+            Object.keys(names).forEach(function (k) {
+                res[k + '_names'] = names[k].length ? names[k].join('; ') : 'none';
+            });
+            res.states = states;
+            res.types = types;
+
+            return JSON.stringify(res);
+          parameters:
+            - name: url
+              value: '{$VEEAM.API.URL}'
+            - name: version
+              value: '{$VEEAM.API.VERSION}'
+            - name: user
+              value: '{$VEEAM.USER}'
+            - name: password
+              value: '{$VEEAM.PASSWORD}'
+            - name: proxy
+              value: '{$VEEAM.HTTP.PROXY}'
+            - name: hours
+              value: '{$VEEAM.SESSIONS.HOURS}'
+            - name: running_max_hours
+              value: '{$VEEAM.RUNNING.MAX.HOURS}'
+            - name: exclude
+              value: '{$VEEAM.SESSION.NAME.NOT_MATCHES}'
+            - name: exclude_type
+              value: '{$VEEAM.SESSION.TYPE.NOT_MATCHES}'
+            - name: exclude_running
+              value: '{$VEEAM.RUNNING.NAME.NOT_MATCHES}'
+          tags:
+            - tag: component
+              value: raw
+        - uuid: 9a1856f9d8e54857bce4b8e9bb458a30
+          name: 'Veeam: Sessions total'
+          type: DEPENDENT
+          key: veeam.lite.sessions.total
+          delay: '0'
+          value_type: UNSIGNED
+          description: 'Sessions created in the lookback window (after exclusions).'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.total
+          master_item:
+            key: veeam.lite.sessions.get
+          tags:
+            - tag: component
+              value: sessions
+        - uuid: 80f8594bdaee4b7ca552cb1fce98e3a4
+          name: 'Veeam: Jobs seen'
+          type: DEPENDENT
+          key: veeam.lite.jobs.seen
+          delay: '0'
+          value_type: UNSIGNED
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.jobs
+          master_item:
+            key: veeam.lite.sessions.get
+          tags:
+            - tag: component
+              value: sessions
+        - uuid: c1b53f4cb9614c60803118c9c6ba43a1
+          name: 'Veeam: Jobs failed (last result)'
+          type: DEPENDENT
+          key: veeam.lite.jobs.failed
+          delay: '0'
+          value_type: UNSIGNED
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.failed
+          master_item:
+            key: veeam.lite.sessions.get
+          tags:
+            - tag: component
+              value: sessions
+        - uuid: f03e0446431d42c6bcab084b4529e5f9
+          name: 'Veeam: Jobs failed names'
+          type: DEPENDENT
+          key: veeam.lite.jobs.failed.names
+          delay: '0'
+          value_type: TEXT
+          trends: '0'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.failed_names
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: veeam.lite.sessions.get
+          tags:
+            - tag: component
+              value: sessions
+        - uuid: b563ec09347149a8a23f2b0e60302fa2
+          name: 'Veeam: Jobs warning (last result)'
+          type: DEPENDENT
+          key: veeam.lite.jobs.warning
+          delay: '0'
+          value_type: UNSIGNED
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.warning
+          master_item:
+            key: veeam.lite.sessions.get
+          tags:
+            - tag: component
+              value: sessions
+        - uuid: cf5a1e69b75c48c79b1503f33b91883a
+          name: 'Veeam: Jobs warning names'
+          type: DEPENDENT
+          key: veeam.lite.jobs.warning.names
+          delay: '0'
+          value_type: TEXT
+          trends: '0'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.warning_names
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: veeam.lite.sessions.get
+          tags:
+            - tag: component
+              value: sessions
+        - uuid: fc5d9702ec6b4b749f03351654dc8e22
+          name: 'Veeam: Sessions running'
+          type: DEPENDENT
+          key: veeam.lite.sessions.running
+          delay: '0'
+          value_type: UNSIGNED
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.running
+          master_item:
+            key: veeam.lite.sessions.get
+          tags:
+            - tag: component
+              value: sessions
+        - uuid: b833b381d2094c04a6ed2f07cc1eb300
+          name: 'Veeam: Sessions long-running'
+          type: DEPENDENT
+          key: veeam.lite.sessions.long_running
+          delay: '0'
+          value_type: UNSIGNED
+          description: 'Sessions not stopped and older than {$VEEAM.RUNNING.MAX.HOURS}h.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.long_running
+          master_item:
+            key: veeam.lite.sessions.get
+          tags:
+            - tag: component
+              value: sessions
+        - uuid: c5687924bd4a47af9878002ae277eefe
+          name: 'Veeam: Sessions long-running names'
+          type: DEPENDENT
+          key: veeam.lite.sessions.long_running.names
+          delay: '0'
+          value_type: TEXT
+          trends: '0'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.long_running_names
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: veeam.lite.sessions.get
+          tags:
+            - tag: component
+              value: sessions
+        - uuid: 265bd0509151474f8da1ea2c27898016
+          name: 'Veeam: Session states'
+          type: DEPENDENT
+          key: veeam.lite.sessions.states
+          delay: '0'
+          value_type: TEXT
+          trends: '0'
+          description: 'Count of sessions per state. Useful to see the exact state names your VBR returns.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.states
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: veeam.lite.sessions.get
+          tags:
+            - tag: component
+              value: sessions
+        - uuid: 8f0c2691af4b4889b0fb263cef1be3c1
+          name: 'Veeam: Session types'
+          type: DEPENDENT
+          key: veeam.lite.sessions.types
+          delay: '0'
+          value_type: TEXT
+          trends: '0'
+          description: 'Count of sessions per sessionType (before exclusions). Use it to fill {$VEEAM.SESSION.TYPE.NOT_MATCHES}.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.types
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: veeam.lite.sessions.get
+          tags:
+            - tag: component
+              value: sessions
+        - uuid: d03c4e0c5cf041ef8a1ed73aa0c78d2e
+          name: 'Veeam: Get proxies'
+          type: SCRIPT
+          key: veeam.lite.proxies.get
+          delay: '{$VEEAM.PROXIES.INTERVAL}'
+          history: 7d
+          value_type: TEXT
+          trends: '0'
+          timeout: '{$VEEAM.DATA.TIMEOUT}'
+          description: 'Proxies from /api/v1/backupInfrastructure/proxies joined with managedServers for host name/type.'
+          params: |
+            var p = JSON.parse(value),
+                base = String(p.url).replace(/\/+$/, ''),
+                req = new HttpRequest(),
+                token = null;
+
+            if (p.proxy) { req.setProxy(p.proxy); }
+
+            function call(method, path, body) {
+                req.clearHeader();
+                req.addHeader('x-api-version: ' + p.version);
+                req.addHeader('Accept: application/json');
+                if (token) { req.addHeader('Authorization: Bearer ' + token); }
+                var resp;
+                if (method === 'POST') {
+                    req.addHeader('Content-Type: application/x-www-form-urlencoded');
+                    resp = req.post(base + path, body);
+                } else {
+                    resp = req.get(base + path);
+                }
+                var status = req.getStatus();
+                if (status < 200 || status >= 300) {
+                    throw 'HTTP ' + status + ' on ' + path + ': ' + String(resp).substring(0, 300);
+                }
+                return resp ? JSON.parse(resp) : {};
+            }
+
+            function login() {
+                token = call('POST', '/api/oauth2/token',
+                    'grant_type=password&username=' + encodeURIComponent(p.user) +
+                    '&password=' + encodeURIComponent(p.password)).access_token;
+                if (!token) { throw 'No access_token in token response'; }
+            }
+
+            function logout() {
+                try { call('POST', '/api/oauth2/logout', ''); } catch (e) {}
+            }
+
+            function getAll(path) {
+                var out = [], skip = 0, limit = 200, page;
+                do {
+                    page = call('GET', path + (path.indexOf('?') >= 0 ? '&' : '?') +
+                        'skip=' + skip + '&limit=' + limit).data || [];
+                    out = out.concat(page);
+                    skip += limit;
+                } while (page.length === limit && skip < 10000);
+                return out;
+            }
+
+            login();
+            var proxies, servers;
+            try {
+                proxies = getAll('/api/v1/backupInfrastructure/proxies');
+                servers = getAll('/api/v1/backupInfrastructure/managedServers');
+            } finally {
+                logout();
+            }
+
+            var byId = {};
+            servers.forEach(function (s) { byId[s.id] = s; });
+
+            return JSON.stringify(proxies.map(function (x) {
+                var srv = (x.server && byId[x.server.hostId]) || {};
+                return {
+                    id: x.id,
+                    name: x.name,
+                    type: x.type,
+                    description: x.description || '',
+                    max_tasks: (x.server && x.server.maxTaskCount) || 0,
+                    host_name: srv.name || '',
+                    host_type: srv.type || ''
+                };
+            }));
+          parameters:
+            - name: url
+              value: '{$VEEAM.API.URL}'
+            - name: version
+              value: '{$VEEAM.API.VERSION}'
+            - name: user
+              value: '{$VEEAM.USER}'
+            - name: password
+              value: '{$VEEAM.PASSWORD}'
+            - name: proxy
+              value: '{$VEEAM.HTTP.PROXY}'
+          tags:
+            - tag: component
+              value: raw
+        - uuid: 74f14cdf666548528c06070747a3d452
+          name: 'Veeam: Tape status (agent)'
+          type: ZABBIX_ACTIVE
+          key: 'veeam.tape.status[{$VEEAM.TAPE.WAIT.MIN}]'
+          delay: '{$VEEAM.TAPE.INTERVAL}'
+          history: 7d
+          value_type: TEXT
+          trends: '0'
+          timeout: 120s
+          description: 'Runs veeam_tape.ps1 locally via the agent UserParameter veeam.tape.status[*]. Tape jobs are not available in the VBR REST API.'
+          tags:
+            - tag: component
+              value: raw
+        - uuid: ae38d1e52aab42c081bb78d227f7122d
+          name: 'Veeam: Tape errors'
+          type: DEPENDENT
+          key: veeam.tape.error
+          delay: '0'
+          value_type: TEXT
+          trends: '0'
+          description: 'Error from veeam_tape.ps1 (empty = OK).'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.error
+              error_handler: CUSTOM_VALUE
+              error_handler_params: ''
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: 'veeam.tape.status[{$VEEAM.TAPE.WAIT.MIN}]'
+          tags:
+            - tag: component
+              value: tape
+        - uuid: aa4be5edf8714e29ad1a4ea339b912f1
+          name: 'Veeam: Tape jobs'
+          type: DEPENDENT
+          key: veeam.tape.jobs.total
+          delay: '0'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.jobs_total
+          master_item:
+            key: 'veeam.tape.status[{$VEEAM.TAPE.WAIT.MIN}]'
+          tags:
+            - tag: component
+              value: tape
+        - uuid: 9c26423b8bd34ac9ba1af129b5adea73
+          name: 'Veeam: Tape jobs waiting for tape'
+          type: DEPENDENT
+          key: veeam.tape.waiting
+          delay: '0'
+          description: 'Jobs in WaitingTape for at least {$VEEAM.TAPE.WAIT.MIN} minutes.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.waiting
+          master_item:
+            key: 'veeam.tape.status[{$VEEAM.TAPE.WAIT.MIN}]'
+          tags:
+            - tag: component
+              value: tape
+        - uuid: 6a75b2bcf0c3409da5084161af6d81f3
+          name: 'Veeam: Tape jobs waiting for tape names'
+          type: DEPENDENT
+          key: veeam.tape.waiting.names
+          delay: '0'
+          value_type: TEXT
+          trends: '0'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.waiting_names
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: 'veeam.tape.status[{$VEEAM.TAPE.WAIT.MIN}]'
+          tags:
+            - tag: component
+              value: tape
+        - uuid: c44d682da2f04e25bdfd687fa600b88b
+          name: 'Veeam: Tape longest wait'
+          type: DEPENDENT
+          key: veeam.tape.waiting.max
+          delay: '0'
+          units: m
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.waiting_max_min
+          master_item:
+            key: 'veeam.tape.status[{$VEEAM.TAPE.WAIT.MIN}]'
+          tags:
+            - tag: component
+              value: tape
+        - uuid: 1667b27c0343455194453b256974d6da
+          name: 'Veeam: Tape jobs failed'
+          type: DEPENDENT
+          key: veeam.tape.failed
+          delay: '0'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.failed
+          master_item:
+            key: 'veeam.tape.status[{$VEEAM.TAPE.WAIT.MIN}]'
+          tags:
+            - tag: component
+              value: tape
+        - uuid: 09c04fc5626c4e21977b19d2b6ae6bfe
+          name: 'Veeam: Tape jobs failed names'
+          type: DEPENDENT
+          key: veeam.tape.failed.names
+          delay: '0'
+          value_type: TEXT
+          trends: '0'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.failed_names
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: 'veeam.tape.status[{$VEEAM.TAPE.WAIT.MIN}]'
+          tags:
+            - tag: component
+              value: tape
+        - uuid: 5d5eccae9c0d464ea557591e02352973
+          name: 'Veeam: Tape jobs warning'
+          type: DEPENDENT
+          key: veeam.tape.warning
+          delay: '0'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.warning
+          master_item:
+            key: 'veeam.tape.status[{$VEEAM.TAPE.WAIT.MIN}]'
+          tags:
+            - tag: component
+              value: tape
+        - uuid: 337b8ae54165471f87940101f78dd82c
+          name: 'Veeam: Tape jobs warning names'
+          type: DEPENDENT
+          key: veeam.tape.warning.names
+          delay: '0'
+          value_type: TEXT
+          trends: '0'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.warning_names
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: 'veeam.tape.status[{$VEEAM.TAPE.WAIT.MIN}]'
+          tags:
+            - tag: component
+              value: tape
+      discovery_rules:
+        - uuid: 55670dcaefc04ef6bb21aa7088391b3a
+          name: 'Veeam: Proxies discovery'
+          type: DEPENDENT
+          key: veeam.lite.proxies.discovery
+          delay: '0'
+          lld_macro_paths:
+            - lld_macro: '{#ID}'
+              path: $.id
+            - lld_macro: '{#NAME}'
+              path: $.name
+            - lld_macro: '{#TYPE}'
+              path: $.type
+          master_item:
+            key: veeam.lite.proxies.get
+          item_prototypes:
+            - uuid: 22d80a0f56ef43a5878e03a19b38f459
+              name: 'Proxy [{#NAME}]: Max task count'
+              type: DEPENDENT
+              key: 'veeam.lite.proxy.maxtask[{#ID}]'
+              delay: '0'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$[?(@.id==''{#ID}'')].max_tasks.first()'
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 6h
+              master_item:
+                key: veeam.lite.proxies.get
+              tags:
+                - tag: component
+                  value: proxies
+                - tag: proxy
+                  value: '{#NAME}'
+            - uuid: 82485a0bf2ad4d92b7c839464351504a
+              name: 'Proxy [{#NAME}]: Host name'
+              type: DEPENDENT
+              key: 'veeam.lite.proxy.host.name[{#ID}]'
+              delay: '0'
+              value_type: CHAR
+              trends: '0'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$[?(@.id==''{#ID}'')].host_name.first()'
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 6h
+              master_item:
+                key: veeam.lite.proxies.get
+              tags:
+                - tag: component
+                  value: proxies
+                - tag: proxy
+                  value: '{#NAME}'
+            - uuid: 7f1fd8593cc044cfa98504ae0fcb09a5
+              name: 'Proxy [{#NAME}]: Host type'
+              type: DEPENDENT
+              key: 'veeam.lite.proxy.host.type[{#ID}]'
+              delay: '0'
+              value_type: CHAR
+              trends: '0'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$[?(@.id==''{#ID}'')].host_type.first()'
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 6h
+              master_item:
+                key: veeam.lite.proxies.get
+              tags:
+                - tag: component
+                  value: proxies
+                - tag: proxy
+                  value: '{#NAME}'
+        - uuid: 42a7a644c9764935964ced6ea55dfd6e
+          name: 'Veeam: Repositories discovery'
+          type: DEPENDENT
+          key: veeam.lite.repos.discovery
+          delay: '0'
+          lld_macro_paths:
+            - lld_macro: '{#ID}'
+              path: $.id
+            - lld_macro: '{#NAME}'
+              path: $.name
+            - lld_macro: '{#TYPE}'
+              path: $.type
+          master_item:
+            key: veeam.lite.repos.get
+          item_prototypes:
+            - uuid: d25cb1789d9c4d31b8bd31731fb61038
+              name: 'Repository [{#NAME}]: Capacity'
+              type: DEPENDENT
+              key: 'veeam.lite.repo.capacity[{#ID}]'
+              delay: '0'
+              units: B
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$[?(@.id==''{#ID}'')].capacity.first()'
+              master_item:
+                key: veeam.lite.repos.get
+              tags:
+                - tag: component
+                  value: repository
+                - tag: repository
+                  value: '{#NAME}'
+            - uuid: 6022568e030a4efc9776c19c420b1d13
+              name: 'Repository [{#NAME}]: Free space'
+              type: DEPENDENT
+              key: 'veeam.lite.repo.free[{#ID}]'
+              delay: '0'
+              units: B
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$[?(@.id==''{#ID}'')].free.first()'
+              master_item:
+                key: veeam.lite.repos.get
+              tags:
+                - tag: component
+                  value: repository
+                - tag: repository
+                  value: '{#NAME}'
+            - uuid: 89269a970e0f47c485c7f30ce3eaf547
+              name: 'Repository [{#NAME}]: Used space'
+              type: DEPENDENT
+              key: 'veeam.lite.repo.used[{#ID}]'
+              delay: '0'
+              units: B
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$[?(@.id==''{#ID}'')].used.first()'
+              master_item:
+                key: veeam.lite.repos.get
+              tags:
+                - tag: component
+                  value: repository
+                - tag: repository
+                  value: '{#NAME}'
+            - uuid: d64159d22e0248fb8b1a07c6984df83a
+              name: 'Repository [{#NAME}]: Free space, %'
+              type: DEPENDENT
+              key: 'veeam.lite.repo.free.pct[{#ID}]'
+              delay: '0'
+              value_type: FLOAT
+              units: '%'
+              description: '-1 when capacity is not reported (e.g. some object storage/tape).'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$[?(@.id==''{#ID}'')].free_pct.first()'
+              master_item:
+                key: veeam.lite.repos.get
+              tags:
+                - tag: component
+                  value: repository
+                - tag: repository
+                  value: '{#NAME}'
+              trigger_prototypes:
+                - uuid: 45b09e477d6044639c638a9b6237f5fe
+                  expression: 'last(/Veeam Backup Lite by HTTP/veeam.lite.repo.free.pct[{#ID}])>=0 and last(/Veeam Backup Lite by HTTP/veeam.lite.repo.free.pct[{#ID}])<{$VEEAM.REPO.FREE.MIN.PCT}'
+                  name: 'Veeam: Repository [{#NAME}] free space below {$VEEAM.REPO.FREE.MIN.PCT}%'
+                  opdata: 'Free: {ITEM.LASTVALUE1}'
+                  priority: WARNING
+            - uuid: 9cba7126352947c4b084c6e2c8350809
+              name: 'Repository [{#NAME}]: Online'
+              type: DEPENDENT
+              key: 'veeam.lite.repo.online[{#ID}]'
+              delay: '0'
+              description: '1 = online, 0 = offline, -1 = not reported by this API version.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$[?(@.id==''{#ID}'')].online.first()'
+              master_item:
+                key: veeam.lite.repos.get
+              tags:
+                - tag: component
+                  value: repository
+                - tag: repository
+                  value: '{#NAME}'
+              trigger_prototypes:
+                - uuid: d7eac32d41b948c281c1136337f11fca
+                  expression: 'last(/Veeam Backup Lite by HTTP/veeam.lite.repo.online[{#ID}])=0'
+                  name: 'Veeam: Repository [{#NAME}] is offline'
+                  priority: AVERAGE
+      macros:
+        - macro: '{$VEEAM.API.URL}'
+          value: 'https://localhost:9419'
+        - macro: '{$VEEAM.API.VERSION}'
+          value: 1.3-rev1
+        - macro: '{$VEEAM.USER}'
+        - macro: '{$VEEAM.PASSWORD}'
+          type: SECRET_TEXT
+        - macro: '{$VEEAM.HTTP.PROXY}'
+        - macro: '{$VEEAM.DATA.TIMEOUT}'
+          value: 60s
+          description: 'Script timeout. Keep below the item intervals.'
+        - macro: '{$VEEAM.REPOS.INTERVAL}'
+          value: 10m
+        - macro: '{$VEEAM.PROXIES.INTERVAL}'
+          value: 1h
+        - macro: '{$VEEAM.SESSIONS.INTERVAL}'
+          value: 5m
+        - macro: '{$VEEAM.SESSIONS.HOURS}'
+          value: '26'
+          description: 'Lookback window for sessions. Slightly over 24h so daily jobs are always seen.'
+        - macro: '{$VEEAM.RUNNING.MAX.HOURS}'
+          value: '12'
+        - macro: '{$VEEAM.SESSION.NAME.NOT_MATCHES}'
+          value: '^(Security & Compliance Analyzer|Malware Detection|Configuration Database Resynchronize.*)$'
+          description: 'Regex of session names to ignore completely (no failed/warning/running alerts).'
+        - macro: '{$VEEAM.SESSION.TYPE.NOT_MATCHES}'
+          value: CHANGE_IF_NEEDED
+          description: 'Regex of session types to ignore completely. See the "Session types" item for the values your VBR returns.'
+        - macro: '{$VEEAM.RUNNING.NAME.NOT_MATCHES}'
+          value: CHANGE_IF_NEEDED
+          description: 'Regex of session names excluded only from the long-running check (still checked for failed/warning).'
+        - macro: '{$VEEAM.REPO.FREE.MIN.PCT}'
+          value: '15'
+        - macro: '{$VEEAM.TAPE.INTERVAL}'
+          value: 20m
+          description: 'How often the agent runs veeam_tape.ps1.'
+        - macro: '{$VEEAM.TAPE.WAIT.MIN}'
+          value: '20'
+          description: 'Minutes a tape job may be in WaitingTape before alerting.'
+  triggers:
+    - uuid: 15c7f1ab5bec41fcbcf4b3b4304249b8
+      expression: 'last(/Veeam Backup Lite by HTTP/veeam.lite.jobs.failed.names)<>"none" and (change(/Veeam Backup Lite by HTTP/veeam.lite.jobs.failed.names)=1 or count(/Veeam Backup Lite by HTTP/veeam.lite.jobs.failed.names,#2)=1)'
+      recovery_mode: RECOVERY_EXPRESSION
+      recovery_expression: 'last(/Veeam Backup Lite by HTTP/veeam.lite.jobs.failed.names)="none"'
+      name: 'Veeam: Job(s) failed'
+      event_name: 'Veeam: Job(s) failed: {ITEM.LASTVALUE1}'
+      type: MULTIPLE
+      manual_close: 'YES'
+      priority: AVERAGE
+      description: 'Fires once when the list of failed jobs changes. Manual close sticks until a new failure appears; resolves by itself when no job is failed.'
+    - uuid: 885afde9eb7348a59587c3c3bc126e0e
+      expression: 'last(/Veeam Backup Lite by HTTP/veeam.lite.jobs.warning.names)<>"none" and (change(/Veeam Backup Lite by HTTP/veeam.lite.jobs.warning.names)=1 or count(/Veeam Backup Lite by HTTP/veeam.lite.jobs.warning.names,#2)=1)'
+      recovery_mode: RECOVERY_EXPRESSION
+      recovery_expression: 'last(/Veeam Backup Lite by HTTP/veeam.lite.jobs.warning.names)="none"'
+      name: 'Veeam: Job(s) ended with warning'
+      event_name: 'Veeam: Job(s) ended with warning: {ITEM.LASTVALUE1}'
+      type: MULTIPLE
+      manual_close: 'YES'
+      priority: WARNING
+      description: 'Fires once when the list of warning jobs changes. Manual close sticks until a new failure appears; resolves by itself when no job is warning.'
+    - uuid: d8206ad50e054cf4ac3b93809b8de105
+      expression: 'last(/Veeam Backup Lite by HTTP/veeam.lite.sessions.long_running)>0 and length(last(/Veeam Backup Lite by HTTP/veeam.lite.sessions.long_running.names))>0'
+      name: 'Veeam: {ITEM.LASTVALUE1} session(s) running longer than {$VEEAM.RUNNING.MAX.HOURS}h'
+      manual_close: 'YES'
+      opdata: '{ITEM.LASTVALUE2}'
+      priority: WARNING
+    - uuid: f21c40826fc041949bd4d926be34574b
+      expression: 'last(/Veeam Backup Lite by HTTP/veeam.tape.waiting.names)<>"none" and (change(/Veeam Backup Lite by HTTP/veeam.tape.waiting.names)=1 or count(/Veeam Backup Lite by HTTP/veeam.tape.waiting.names,#2)=1)'
+      recovery_mode: RECOVERY_EXPRESSION
+      recovery_expression: 'last(/Veeam Backup Lite by HTTP/veeam.tape.waiting.names)="none"'
+      name: 'Veeam: Tape job(s) waiting for tape'
+      event_name: 'Veeam: Tape job(s) waiting for tape: {ITEM.LASTVALUE1}'
+      type: MULTIPLE
+      manual_close: 'YES'
+      priority: HIGH
+      description: 'Tape job in WaitingTape longer than {$VEEAM.TAPE.WAIT.MIN} min. Usually no free/writable media in the pool or the library/drive is offline. Fires once per change; resolves when nothing is waiting.'
+    - uuid: 5493c9803e8b439cb0e106ea16e5d19f
+      expression: 'last(/Veeam Backup Lite by HTTP/veeam.tape.failed.names)<>"none" and (change(/Veeam Backup Lite by HTTP/veeam.tape.failed.names)=1 or count(/Veeam Backup Lite by HTTP/veeam.tape.failed.names,#2)=1)'
+      recovery_mode: RECOVERY_EXPRESSION
+      recovery_expression: 'last(/Veeam Backup Lite by HTTP/veeam.tape.failed.names)="none"'
+      name: 'Veeam: Tape job(s) failed'
+      event_name: 'Veeam: Tape job(s) failed: {ITEM.LASTVALUE1}'
+      type: MULTIPLE
+      manual_close: 'YES'
+      priority: AVERAGE
+      description: 'Last result of an enabled tape job is Failed. Fires once per change.'
+    - uuid: b210e73a64e54ce38e2387f2cae6a9cb
+      expression: 'last(/Veeam Backup Lite by HTTP/veeam.tape.warning.names)<>"none" and (change(/Veeam Backup Lite by HTTP/veeam.tape.warning.names)=1 or count(/Veeam Backup Lite by HTTP/veeam.tape.warning.names,#2)=1)'
+      recovery_mode: RECOVERY_EXPRESSION
+      recovery_expression: 'last(/Veeam Backup Lite by HTTP/veeam.tape.warning.names)="none"'
+      name: 'Veeam: Tape job(s) ended with warning'
+      event_name: 'Veeam: Tape job(s) ended with warning: {ITEM.LASTVALUE1}'
+      type: MULTIPLE
+      manual_close: 'YES'
+      priority: WARNING
+      description: 'Last result of an enabled tape job is Warning. Fires once per change.'
+    - uuid: 2cc91d7dfc1d48e38ac2ba19b7477d03
+      expression: 'length(last(/Veeam Backup Lite by HTTP/veeam.tape.error))>0 and (change(/Veeam Backup Lite by HTTP/veeam.tape.error)=1 or count(/Veeam Backup Lite by HTTP/veeam.tape.error,#2)=1)'
+      recovery_mode: RECOVERY_EXPRESSION
+      recovery_expression: 'length(last(/Veeam Backup Lite by HTTP/veeam.tape.error))=0'
+      name: 'Veeam: Tape status script error'
+      event_name: 'Veeam: Tape status script error: {ITEM.LASTVALUE1}'
+      manual_close: 'YES'
+      priority: WARNING
